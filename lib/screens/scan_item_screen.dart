@@ -1,14 +1,16 @@
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/cart_item.dart';
 import '../providers/basket_provider.dart';
 import '../providers/currency_formatter_provider.dart';
+import '../providers/scan_provider.dart';
 import '../theme/app_theme.dart';
 import '../widgets/basket_item_tile.dart';
+import '../widgets/camera_permission_error.dart';
 import '../widgets/primary_button.dart';
-
-const double _mockScannedPrice = 4.99;
+import '../widgets/scan_viewfinder_overlay.dart';
 
 class ScanItemScreen extends ConsumerStatefulWidget {
   const ScanItemScreen({super.key});
@@ -19,15 +21,44 @@ class ScanItemScreen extends ConsumerStatefulWidget {
 
 class _ScanItemScreenState extends ConsumerState<ScanItemScreen> {
   final _nameController = TextEditingController(text: 'Scanned Item');
+  final _priceController = TextEditingController();
+  var _priceManuallyEdited = false;
+  var _nameManuallyEdited = false;
 
   @override
   void dispose() {
     _nameController.dispose();
+    _priceController.dispose();
     super.dispose();
   }
 
+  double? _resolvePrice(ScanState scanState) {
+    if (_priceManuallyEdited) {
+      return double.tryParse(_priceController.text.trim());
+    }
+    return scanState.detectedPrice;
+  }
+
+  void _syncPriceField(ScanState scanState) {
+    if (_priceManuallyEdited) return;
+    if (scanState.detectedPrice != null) {
+      _priceController.text = scanState.detectedPrice!.toStringAsFixed(2);
+    }
+  }
+
+  void _syncNameField(ScanState scanState) {
+    if (_nameManuallyEdited) return;
+    final name = scanState.detectedProductName;
+    if (name != null && name.isNotEmpty) {
+      _nameController.text = name;
+    }
+  }
+
   Future<void> _confirmAndAdd() async {
+    final scanState = ref.read(scanProvider);
     final name = _nameController.text.trim();
+    final price = _resolvePrice(scanState);
+
     if (name.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter an item name.')),
@@ -35,16 +66,30 @@ class _ScanItemScreenState extends ConsumerState<ScanItemScreen> {
       return;
     }
 
+    if (price == null || price <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No price detected. Scan a tag or enter a price.'),
+        ),
+      );
+      return;
+    }
+
     await ref.read(basketProvider.notifier).addItem(
           name: name,
-          scannedPrice: _mockScannedPrice,
+          scannedPrice: price,
         );
 
     if (mounted) {
+      ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('$name added to basket.')),
       );
       _nameController.text = 'Scanned Item';
+      _priceController.clear();
+      _priceManuallyEdited = false;
+      _nameManuallyEdited = false;
+      ref.read(scanProvider.notifier).resetDetection();
     }
   }
 
@@ -53,27 +98,40 @@ class _ScanItemScreenState extends ConsumerState<ScanItemScreen> {
     final formatter = ref.watch(currencyFormatterProvider);
     final items = ref.watch(basketProvider);
     final total = ref.watch(basketTotalProvider);
-    final formattedPrice = formatter.format(_mockScannedPrice);
+    final scanState = ref.watch(scanProvider);
+
+    ref.listen<ScanState>(scanProvider, (previous, next) {
+      _syncPriceField(next);
+      _syncNameField(next);
+    });
+
+    final detectedPrice = scanState.detectedPrice;
+    final formattedPrice = detectedPrice != null
+        ? formatter.format(detectedPrice)
+        : null;
     final formattedTotal = formatter.format(total);
+    final canConfirm = _resolvePrice(scanState) != null;
 
     return Scaffold(
       backgroundColor: Colors.black,
       body: Column(
         children: [
-          _buildTopBar(context),
-          Expanded(child: _buildViewfinder(formattedPrice)),
+          _buildTopBar(context, scanState),
+          Expanded(child: _buildViewfinder(scanState, formattedPrice)),
           _buildBottomCard(
             context,
             items: items,
             formattedPrice: formattedPrice,
             formattedTotal: formattedTotal,
+            canConfirm: canConfirm,
+            scanState: scanState,
           ),
         ],
       ),
     );
   }
 
-  Widget _buildTopBar(BuildContext context) {
+  Widget _buildTopBar(BuildContext context, ScanState scanState) {
     return Container(
       color: AppColors.cardWhite,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -81,10 +139,7 @@ class _ScanItemScreenState extends ConsumerState<ScanItemScreen> {
         bottom: false,
         child: Row(
           children: [
-            IconButton(
-              icon: const Icon(Icons.arrow_back),
-              onPressed: () {},
-            ),
+            const SizedBox(width: 48),
             const Expanded(
               child: Text(
                 'Scan Item Price',
@@ -93,8 +148,15 @@ class _ScanItemScreenState extends ConsumerState<ScanItemScreen> {
               ),
             ),
             IconButton(
-              icon: const Icon(Icons.camera_alt_outlined),
-              onPressed: () {},
+              icon: Icon(
+                scanState.cameraController?.value.flashMode == FlashMode.torch
+                    ? Icons.flash_on
+                    : Icons.camera_alt_outlined,
+              ),
+              onPressed: scanState.status == ScanStatus.unsupported ||
+                      scanState.status == ScanStatus.error
+                  ? null
+                  : () => ref.read(scanProvider.notifier).toggleTorch(),
             ),
           ],
         ),
@@ -102,59 +164,34 @@ class _ScanItemScreenState extends ConsumerState<ScanItemScreen> {
     );
   }
 
-  Widget _buildViewfinder(String formattedPrice) {
+  Widget _buildViewfinder(ScanState scanState, String? formattedPrice) {
+    if (scanState.status == ScanStatus.unsupported) {
+      return const CameraPermissionError(
+        message:
+            'Price scanning requires an Android or iOS device with a camera.',
+      );
+    }
+
+    if (scanState.status == ScanStatus.error) {
+      return CameraPermissionError(
+        message: scanState.errorMessage ?? 'Camera unavailable.',
+      );
+    }
+
+    final controller = scanState.cameraController;
+    if (scanState.status == ScanStatus.initializing || controller == null) {
+      return const Center(
+        child: CircularProgressIndicator(color: Colors.white),
+      );
+    }
+
     return Stack(
       fit: StackFit.expand,
       children: [
-        Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [Color(0xFF37474F), Color(0xFF263238)],
-            ),
-          ),
-          child: CustomPaint(painter: _ShelfPainter()),
-        ),
-        Center(
-          child: Container(
-            width: 180,
-            height: 180,
-            decoration: BoxDecoration(
-              border: Border.all(color: Colors.white, width: 3),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Align(
-              alignment: Alignment.bottomCenter,
-              child: Container(
-                margin: const EdgeInsets.only(bottom: 24),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: Colors.yellow.shade100,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  formattedPrice,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 20,
-                    color: Colors.black87,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-        const Positioned(
-          bottom: 120,
-          left: 0,
-          right: 0,
-          child: Text(
-            'Scanning Price...',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white70, fontSize: 14),
-          ),
+        CameraPreview(controller),
+        ScanViewfinderOverlay(
+          status: scanState.status,
+          formattedPrice: formattedPrice,
         ),
       ],
     );
@@ -163,9 +200,13 @@ class _ScanItemScreenState extends ConsumerState<ScanItemScreen> {
   Widget _buildBottomCard(
     BuildContext context, {
     required List<CartItem> items,
-    required String formattedPrice,
+    required String? formattedPrice,
     required String formattedTotal,
+    required bool canConfirm,
+    required ScanState scanState,
   }) {
+    final priceLabel = formattedPrice ?? 'Scanning...';
+
     return Container(
       width: double.infinity,
       decoration: const BoxDecoration(
@@ -180,16 +221,40 @@ class _ScanItemScreenState extends ConsumerState<ScanItemScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              'Price Found: $formattedPrice',
+              scanState.status == ScanStatus.found
+                  ? 'Price Found: $priceLabel'
+                  : 'Price Found: $priceLabel',
               style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
             ),
+            if (scanState.detectedProductName != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Product: ${scanState.detectedProductName}',
+                style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+              ),
+            ],
             const SizedBox(height: 12),
             TextField(
               controller: _nameController,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'Item name',
+                hintText: scanState.detectedProductName == null
+                    ? 'Enter name if not detected'
+                    : null,
                 isDense: true,
               ),
+              onChanged: (_) => _nameManuallyEdited = true,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _priceController,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(
+                labelText: 'Price (override if needed)',
+                isDense: true,
+              ),
+              onChanged: (_) => _priceManuallyEdited = true,
             ),
             const SizedBox(height: 12),
             if (items.isEmpty)
@@ -228,40 +293,11 @@ class _ScanItemScreenState extends ConsumerState<ScanItemScreen> {
             const SizedBox(height: 12),
             PrimaryButton(
               label: 'CONFIRM & ADD',
-              onPressed: _confirmAndAdd,
+              onPressed: canConfirm ? _confirmAndAdd : null,
             ),
           ],
         ),
       ),
     );
   }
-}
-
-class _ShelfPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final shelfPaint = Paint()..color = const Color(0xFF546E7A);
-    final jarPaint = Paint()..color = const Color(0xFF78909C);
-
-    for (var row = 0; row < 3; row++) {
-      final y = size.height * 0.25 + row * 80;
-      canvas.drawRect(
-        Rect.fromLTWH(20, y, size.width - 40, 6),
-        shelfPaint,
-      );
-      for (var col = 0; col < 4; col++) {
-        final x = 40 + col * ((size.width - 80) / 4);
-        canvas.drawRRect(
-          RRect.fromRectAndRadius(
-            Rect.fromLTWH(x, y - 50, 40, 50),
-            const Radius.circular(6),
-          ),
-          jarPaint,
-        );
-      }
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

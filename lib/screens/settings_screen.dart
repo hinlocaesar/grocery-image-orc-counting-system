@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../models/currency_config.dart';
+import '../data/currency_catalog.dart';
 import '../providers/currency_formatter_provider.dart';
 import '../providers/currency_provider.dart';
 import '../theme/app_theme.dart';
+import '../widgets/currency_search_picker.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -13,6 +14,7 @@ class SettingsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final current = ref.watch(currencyProvider);
     final formatter = ref.watch(currencyFormatterProvider);
+    final selected = CurrencyCatalog.optionFor(current);
 
     return Scaffold(
       backgroundColor: AppColors.mintLight,
@@ -32,32 +34,63 @@ class SettingsScreen extends ConsumerWidget {
                           fontWeight: FontWeight.bold,
                         ),
                   ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Search from ${CurrencyCatalog.all.length} world currencies',
+                    style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+                  ),
                   const SizedBox(height: 12),
-                  DropdownButtonFormField<CurrencyConfig>(
-                    initialValue: CurrencyConfig.presets.firstWhere(
-                      (preset) => preset.code == current.code,
-                      orElse: () => current,
-                    ),
-                    decoration: const InputDecoration(
-                      labelText: 'Select currency',
-                    ),
-                    items: CurrencyConfig.presets
-                        .map(
-                          (preset) => DropdownMenuItem(
-                            value: preset,
-                            child: Text(
-                              '${preset.symbol} ${preset.code} (${preset.locale})',
-                            ),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: (preset) {
-                      if (preset != null) {
+                  InkWell(
+                    onTap: () => CurrencySearchPicker.show(
+                      context,
+                      selectedCode: current.code,
+                      onSelected: (option) {
                         ref
                             .read(currencyProvider.notifier)
-                            .setCurrency(preset);
-                      }
-                    },
+                            .setCurrency(option.toConfig());
+                      },
+                    ),
+                    borderRadius: BorderRadius.circular(12),
+                    child: InputDecorator(
+                      decoration: const InputDecoration(
+                        labelText: 'Selected currency',
+                        suffixIcon: Icon(Icons.search),
+                        border: OutlineInputBorder(),
+                      ),
+                      child: Row(
+                        children: [
+                          Text(
+                            selected.symbol,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  selected.code,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 16,
+                                  ),
+                                ),
+                                Text(
+                                  selected.name,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: Colors.grey.shade700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 20),
                   Text(

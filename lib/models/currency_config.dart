@@ -15,13 +15,6 @@ class CurrencyConfig {
     locale: 'en_US',
   );
 
-  static const presets = [
-    CurrencyConfig(code: 'USD', symbol: r'$', locale: 'en_US'),
-    CurrencyConfig(code: 'EUR', symbol: '€', locale: 'de_DE'),
-    CurrencyConfig(code: 'GBP', symbol: '£', locale: 'en_GB'),
-    CurrencyConfig(code: 'JPY', symbol: '¥', locale: 'ja_JP'),
-  ];
-
   CurrencyConfig copyWith({
     String? code,
     String? symbol,
